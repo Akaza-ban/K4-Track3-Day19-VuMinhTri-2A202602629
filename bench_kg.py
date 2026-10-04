@@ -4,7 +4,7 @@
     python bench_kg.py --build --limit 2   # load law + 2 news articles into Neo4j with YOUR build_graph (KG-2)
     python bench_kg.py --build             # load both full KBs (~20 LLM calls, ~0.01 USD)
     python bench_kg.py --check    # self-check KG-1..KG-4 on 1 news article (~1 LLM call, < 0.001 USD)
-    python bench_kg.py            # needs OPENAI_API_KEY in .env
+    python bench_kg.py            # needs an API key in .env (OpenAI, OpenRouter, Gemini or Anthropic — see src/llm.py)
     python bench_kg.py --judge    # + LLM-as-judge score (metered separately, not counted in pipeline cost)
 
 Writes ket_qua_benchmark_kg.txt (summary table + every answer).
@@ -61,10 +61,15 @@ def fail(code: str, problem: str, fix: str) -> None:
 def ok(message: str) -> None:
     print(f"[OK] {message}")
 
-def require_key() -> None:
-    if not os.getenv("OPENAI_API_KEY", "").startswith("sk-"):
-        fail("SETUP-1", "Chưa có OPENAI_API_KEY.",
-             "copy .env.example thành .env, điền OPENAI_API_KEY=sk-... (không cần cho --check).")
+def make_llm():
+    try:
+        llm = llm_mod.MeteredLLM()
+    except (RuntimeError, ImportError) as error:
+        fail("SETUP-1", f"Chưa dùng được provider LLM: {error}",
+             "copy .env.example thành .env, điền ít nhất một key: OPENAI_API_KEY, OPENROUTER_API_KEY, "
+             "GEMINI_API_KEY hoặc ANTHROPIC_API_KEY (Anthropic chỉ dùng cho chat; embedding cần một trong 3 key đầu).")
+    print(f"[provider] chat = {llm.chat_model} | embedding = {llm.embedding_model}")
+    return llm
 
 def connect_graph():
     from neo4j.exceptions import AuthError, ServiceUnavailable
@@ -101,10 +106,9 @@ def check() -> int:
              "pytest tests/test_graph.py -k LinkEntity -v")
     ok("KG-1 link_entity")
 
-    require_key()
     graph = connect_graph()
     ok("Neo4j kết nối được")
-    llm = llm_mod.MeteredOpenAI()
+    llm = make_llm()
     news = [d for d in news_docs if d.id == CHECK_NEWS]
     graph.reset()
     graph_mod.build_graph(graph, law_docs, news, llm.chat)
@@ -149,9 +153,8 @@ def build(limit: int | None) -> int:
     law_docs, news_docs = load_corpus()
     if limit:  # always include the article the guide's example queries use (Lê Minh Thành)
         news_docs = sorted(news_docs, key=lambda d: d.id != CHECK_NEWS)[:limit]
-    require_key()
     graph = connect_graph()
-    llm = llm_mod.MeteredOpenAI()
+    llm = make_llm()
     graph.reset()
     _, usage = metered(llm, lambda: graph_mod.build_graph(graph, law_docs, news_docs, llm.chat))
     stats = graph.stats()
@@ -187,10 +190,9 @@ def main() -> int:
     if args.build:
         return build(args.limit)
 
-    require_key()
     law_docs, news_docs = load_corpus()
     connect_graph().close()  # fail fast before paying for embeddings
-    llm = llm_mod.MeteredOpenAI()
+    llm = make_llm()
     chunks = chunk_docs(law_docs + news_docs, args.chunk_size)
     questions = json.loads(Path("data/benchmark_kg.json").read_text(encoding="utf-8"))
 

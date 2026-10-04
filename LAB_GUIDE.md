@@ -25,7 +25,7 @@ Làm **đúng thứ tự**. Mỗi bước có **lệnh kiểm tra** và **dấu 
 
 ## Bước 0 — Setup
 
-**Cần có:** Python 3.11, Docker Desktop (đang chạy), OpenAI API key.
+**Cần có:** Python 3.11, Docker Desktop (đang chạy), và ít nhất một API key: OpenAI (khuyên dùng), OpenRouter, Gemini hoặc Anthropic. Anthropic chỉ dùng cho chat; embedding cần OpenAI/OpenRouter/Gemini.
 
 ```bash
 # 1. Môi trường Python
@@ -38,8 +38,30 @@ docker run -d --name neo4j-drug-kg -p 7474:7474 -p 7687:7687 -e NEO4J_AUTH=neo4j
 
 # 3. API key
 copy .env.example .env             # macOS/Linux: cp .env.example .env
-#    mở .env, điền OPENAI_API_KEY=sk-...
+#    mở .env, điền ít nhất một key; xem bảng provider bên dưới
 ```
+
+### Chọn provider
+
+Provider chính và rẻ nhất cho baseline là **OpenAI**. OpenRouter, Gemini và Anthropic là phương án dự phòng. `bench_kg.py` in provider thực tế ở đầu mỗi lần chạy để số liệu benchmark không bị lẫn.
+
+| Provider chat | Key trong `.env` | Model mặc định | Embedding dùng |
+| --- | --- | --- | --- |
+| **OpenAI (chính)** | `OPENAI_API_KEY` | `gpt-4o-mini` | OpenAI `text-embedding-3-small` |
+| OpenRouter | `OPENROUTER_API_KEY` | `openai/gpt-4o-mini` | OpenRouter `openai/text-embedding-3-small` |
+| Gemini | `GEMINI_API_KEY` | `gemini-2.5-flash-lite` | Gemini `gemini-embedding-001` |
+| Anthropic | `ANTHROPIC_API_KEY` | `claude-opus-5-5` | **Không có embedding API**: phải thêm key OpenAI/OpenRouter/Gemini |
+
+Nếu có nhiều key, tự động ưu tiên: **OpenAI → OpenRouter → Gemini → Anthropic**. Muốn ép provider:
+
+```dotenv
+LLM_PROVIDER=anthropic
+EMBEDDING_PROVIDER=gemini
+ANTHROPIC_API_KEY=...
+GEMINI_API_KEY=...
+```
+
+Một lần benchmark chỉ dùng **một chat provider** và **một embedding provider**, không tự chuyển giữa chừng; như vậy cost/quality so sánh được. Không mix kết quả từ provider khác nhau trong cùng một bảng báo cáo. Giá USD là ước tính theo bảng trong `src/llm.py`; kiểm tra bảng giá provider trước khi báo cáo chính thức.
 
 Trên Windows, đặt UTF-8 cho terminal trước khi chạy Python để không lỗi tiếng Việt:
 
@@ -304,7 +326,7 @@ MATCH p = shortestPath((a)-[*..4]-(b)) RETURN p LIMIT 5;
 
 > **Đánh đổi cần nghĩ:** lấy **hết** khoản thì đủ thông tin nhưng prompt dài và đắt. Lấy **ít** thì rẻ nhưng có thể thiếu. Bước 8 sẽ cho bạn thấy lựa chọn của mình hụt ở đâu.
 
-**Kiểm tra:** `python bench_kg.py --check`. Lệnh này cần `OPENAI_API_KEY`; nó gọi LLM khoảng 1 lần trên 1 bài báo, tốn dưới 0,001 USD.
+**Kiểm tra:** `python bench_kg.py --check`. Lệnh này cần key của chat provider và embedding provider đã chọn; nó gọi LLM khoảng 1 lần trên 1 bài báo. Với OpenAI tốn dưới 0,001 USD; provider khác có giá khác.
 
 **Dấu hiệu xong:** có `[OK] KG-2 build_graph …` và `[OK] KG-3 context …`. `--check` kiểm theo **hợp đồng**, không theo label, nên ontology nào cũng qua được nếu:
 - node của cả 2 KB đều có `doc_id`;
@@ -490,16 +512,16 @@ Pipeline có những điểm yếu **thật**, điển hình của GraphRAG ngo�
 | --- | --- | --- |
 | `NotImplementedError: TODO KG-…` | Chưa làm TODO đó | Thông báo ghi sẵn lệnh kiểm tra. Làm theo Bước 3–6 |
 | `[LỖI KG-1]` … `[LỖI KG-4]` | Đã viết TODO nhưng kết quả sai | Chạy lệnh ghi trong "Cách sửa". Riêng KG-2/KG-3: thử Cypher trong Neo4j Browser (Bước 5) |
-| `[LỖI SETUP-1]` thiếu `OPENAI_API_KEY` | Chưa có `.env` hoặc key sai dạng | `copy .env.example .env`, điền key bắt đầu bằng `sk-`. Cả `--check` và `--judge` đều cần key |
+| `[LỖI SETUP-1]` chưa dùng được provider | Thiếu key, `LLM_PROVIDER`/`EMBEDDING_PROVIDER` sai, hoặc chọn Anthropic cho embedding | Tạo `.env` từ `.env.example`; điền key phù hợp. Anthropic chỉ dùng chat, không dùng embedding |
 | `[LỖI SETUP-2]` không kết nối được Neo4j | Docker hoặc container chưa chạy | Mở Docker Desktop → `docker start neo4j-drug-kg` → đợi khoảng 20 giây. Lần đầu dùng `docker run` ở Bước 0. Kiểm tra bằng `docker ps` |
 | `[LỖI SETUP-3]` Neo4j từ chối đăng nhập | Mật khẩu trong `.env` khác lúc `docker run` | Sửa `NEO4J_PASSWORD`. Quên mật khẩu: `docker rm -f neo4j-drug-kg` rồi chạy lại `docker run` |
 | `[LỖI DATA-1]` thiếu dữ liệu | `data/drug_*` trống | `python scripts/crawl_drug_corpus.py --news-limit 20` |
 | `docker: … port is already allocated` | Cổng 7474 hoặc 7687 đang bị chiếm | `docker ps -a` → `docker rm -f <container cũ>` |
 | `docker: … cannot connect to the Docker daemon` / `pipe/dockerDesktopLinuxEngine` | Docker Desktop chưa mở | Mở Docker Desktop, đợi biểu tượng chuyển xanh |
-| `openai.AuthenticationError` (401) | Key sai hoặc đã bị thu hồi | Tạo key mới ở platform.openai.com |
-| `openai.RateLimitError` (429) / `insufficient_quota` | Hết credit hoặc gọi quá nhanh | Nạp credit, hoặc đợi 1 phút rồi chạy lại |
+| Lỗi authentication / 401 | Key của provider đã chọn sai hoặc bị thu hồi | Kiểm tra dòng `[provider]` khi chạy, rồi thay đúng key trong `.env` |
+| Lỗi rate limit / 429 / `insufficient_quota` | Provider hết credit hoặc gọi quá nhanh | Nạp credit, đợi 1 phút, hoặc chọn provider khác bằng `LLM_PROVIDER` + `EMBEDDING_PROVIDER` |
 | `UnicodeEncodeError: 'charmap'` | Terminal Windows không dùng UTF-8 | `$env:PYTHONIOENCODING="utf-8"` (PowerShell) hoặc `export PYTHONIOENCODING=utf-8` (Git Bash) |
-| `ModuleNotFoundError: neo4j` hoặc `openai` | Chưa cài, hoặc sai venv | Kích hoạt `.venv` rồi `pip install -r requirements.txt` |
+| `ModuleNotFoundError: neo4j`, `openai` hoặc `anthropic` | Chưa cài, hoặc sai venv | Kích hoạt `.venv` rồi `pip install -r requirements.txt` |
 | `tests/test_base.py` fail | Bạn đã sửa vào base RAG | `git diff src/chunking.py src/store.py src/agent.py`, hoàn tác phần sửa nhầm |
 | Neo4j Browser trống, hoặc chỉ có một phần graph | Lần chạy bị dừng giữa chừng, hoặc vừa chạy `--check` / `--build --limit` (chỉ dựng graph nhỏ) | `python bench_kg.py --build` (chỉ nạp graph, ~1–2 phút) |
 | Ảnh graph rối, quá nhiều node | Truy vấn trả về quá nhiều | Thêm `LIMIT 25`, hoặc lọc theo một `Case`/`Article` cụ thể |
