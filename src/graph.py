@@ -252,6 +252,16 @@ class Neo4jGraph:
         #   1. self.seed_facts(question, doc_ids) -> (seed_ids, facts)   (ontology-independent, already written)
         #   2. From the seeds, walk to the other KB through your bridge node (Cypher, see LAB_GUIDE Bước 5)
         #   3. Append one readable string per fact; return the list.
+        #
+        # HINT (suggested ontology):
+        #   a. Cases that are a seed or next to one -> add f"Vụ việc '{name}': {summary}" to facts
+        #        MATCH (k:Case) WHERE elementId(k) IN $ids OR EXISTS { MATCH (s)--(k) WHERE elementId(s) IN $ids }
+        #   b. For those cases follow
+        #        (Case)-[:CHARGED_WITH]->(Crime)<-[:DEFINES]-(Article)-[:HAS_CLAUSE]->(Clause)
+        #      keep clause 1 + clauses that MENTION a Substance the case INVOLVES
+        #   c. Articles named in the question ("Điều 251" -> re.findall(r"[Đđ]iều (\d+)", question)):
+        #      clause 1 + clauses mentioning find_substances(question)
+        #   d. One fact per clause: f"[{article_id} - {title}] khoản {number}: {text}"
         raise NotImplementedError("TODO KG-3 Neo4jGraph.context (src/graph.py) - kiểm tra: python bench_kg.py --check")
 
 # ---------------------------------------------------------------------------------------------- KG-2

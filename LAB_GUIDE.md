@@ -195,6 +195,34 @@ for d in news_docs:
 
 **Bạn viết:** từ seed, đi **qua node cầu nối sang KB còn lại**. Với câu hỏi về một vụ án, phải đi tới được Điều luật và khoản phù hợp.
 
+**Gợi ý nếu dùng ontology gợi ý** (tự thiết kế thì áp dụng ý tưởng tương tự cho ontology của bạn):
+
+1. Từ `seed_ids`, lấy các `Case` là seed hoặc kề seed, thêm tóm tắt vụ vào `facts`:
+
+   ```cypher
+   MATCH (k:Case)
+   WHERE elementId(k) IN $ids OR EXISTS { MATCH (s)--(k) WHERE elementId(s) IN $ids }
+   RETURN elementId(k) AS id, k.name AS name, k.summary AS summary
+   ```
+
+2. Với mỗi `Case` đó, đi theo đường:
+
+   ```
+   (Case)-[:CHARGED_WITH]->(Crime)<-[:DEFINES]-(Article)-[:HAS_CLAUSE]->(Clause)
+   ```
+
+   Chỉ giữ lại:
+   - khoản 1 (khung cơ bản), **và**
+   - những khoản `MENTIONS` một `Substance` mà chính vụ đó `INVOLVES`.
+
+3. Nếu câu hỏi nhắc thẳng một Điều (ví dụ "Điều 251", lấy bằng `re.findall(r"[Đđ]iều (\d+)", question)`), lấy khoản 1 của Điều đó và các khoản nhắc tới chất có trong câu hỏi (`find_substances(question)`).
+
+4. Mỗi khoản thêm 1 dòng vào `facts`:
+
+   ```python
+   facts.append(f"[{article_id} - {title}] khoản {number}: {text}")
+   ```
+
 **Cách làm khuyến nghị:**
 
 1. Dựng graph bằng code Bước 4. `--check` sẽ dừng ở KG-3, nhưng graph nhỏ (luật + 1 bài báo) vẫn còn lại để thử:
