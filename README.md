@@ -35,7 +35,7 @@ flowchart LR
     G --> H[GraphRAG<br/>prompt = chunk + dữ kiện graph] --> A2[Trả lời]
 ```
 
-Knowledge Graph nối 2 KB qua node `Crime` (tội danh):
+Knowledge Graph phải nối được 2 KB qua một **node cầu nối**. **Ontology (entity, relationship) do bạn tự thiết kế.** Dưới đây là **ontology gợi ý** có sẵn trong code, trong đó cầu nối là `Crime` (tội danh). Bạn được dùng nguyên, sửa, hoặc thay bằng thiết kế của riêng mình (tự thiết kế được bonus +15):
 
 ```mermaid
 flowchart LR
@@ -59,7 +59,7 @@ Sau đó bạn **đo**: độ chính xác, số token, chi phí USD, độ trễ
 
 Sau lab, bạn có thể:
 
-1. Thiết kế schema Knowledge Graph nối nhiều nguồn dữ liệu, và giải thích vai trò của **node cầu nối**.
+1. **Thiết kế ontology** (entity, relationship, khóa định danh) cho Knowledge Graph nối nhiều nguồn dữ liệu; giải thích vai trò của **node cầu nối** và kiểm chứng thiết kế bằng competency questions.
 2. Chọn cách trích xuất phù hợp với từng loại văn bản: **regex** cho văn bản có cấu trúc, **LLM** cho văn xuôi. Nêu được ưu nhược của mỗi cách.
 3. Viết **Cypher** đi nhiều bước (multi-hop) trên Neo4j.
 4. Đo và so sánh **chi phí** (token, USD, thời gian) giữa Flat RAG và GraphRAG, tách riêng chi phí dựng hệ thống và chi phí mỗi câu hỏi.
@@ -70,9 +70,10 @@ Sau lab, bạn có thể:
 
 | Phần | Nội dung | Ở đâu |
 | --- | --- | --- |
-| Code | 4 TODO trong `src/graph.py`: nối tội danh (KG-1), tách Điều luật (KG-2), agent GraphRAG (KG-3), Cypher đi xuyên 2 KB (KG-4) | LAB_GUIDE Bước 2–5 |
-| Đo | Chạy benchmark 6 câu hỏi qua 2 pipeline | LAB_GUIDE Bước 6 |
-| Phân tích | Khám phá graph trên Neo4j Browser, tìm và chứng minh lỗi | LAB_GUIDE Bước 7 |
+| Thiết kế | Ontology cho 2 KB → `report/ONTOLOGY.md` (bắt buộc; tự thiết kế khác gợi ý được bonus +15) | LAB_GUIDE Bước 2 |
+| Code | 4 TODO trong `src/graph.py`: chuẩn hóa entity (KG-1), dựng graph (KG-2), Cypher multi-hop xuyên 2 KB (KG-3), agent GraphRAG (KG-4) | LAB_GUIDE Bước 3–6 |
+| Đo | Chạy benchmark 6 câu hỏi qua 2 pipeline | LAB_GUIDE Bước 7 |
+| Phân tích | Khám phá graph trên Neo4j Browser, tìm và chứng minh lỗi | LAB_GUIDE Bước 8 |
 | Báo cáo | `report/REPORT_KG.md` + 3 ảnh chụp Neo4j Browser | SUBMISSION |
 
 Phần base (chunking, vector store, agent RAG) **đã có sẵn và chạy được**; bạn không phải viết lại.
@@ -82,7 +83,7 @@ Phần base (chunking, vector store, agent RAG) **đã có sẵn và chạy đư
 - **Kiến thức:** Python, RAG cơ bản (embedding, top-k retrieval). Chưa cần biết Neo4j hay Cypher; guide có hướng dẫn.
 - **Công cụ:** Python 3.11, Docker Desktop, Git, OpenAI API key.
 - **Chi phí API:** khoảng **0,01–0,05 USD** cho mỗi lần chạy benchmark (`gpt-4o-mini`).
-- **Thời gian:** khoảng 4 giờ (setup 20', code 2 giờ, benchmark và phân tích 1 giờ, báo cáo 40').
+- **Thời gian:** khoảng 5 giờ (setup 20', thiết kế ontology 40', code 2 giờ, benchmark và phân tích 1 giờ, báo cáo 40').
 
 ## Cấu trúc repo
 
@@ -91,13 +92,13 @@ Phần base (chunking, vector store, agent RAG) **đã có sẵn và chạy đư
 ├── docs/img/             ← ảnh mẫu Neo4j Browser (dùng trong LAB_GUIDE)
 ├── LAB_GUIDE.md          ← hướng dẫn từng bước + xử lý lỗi
 ├── SUBMISSION.md         ← kỳ vọng, thang điểm, cách nộp
-├── bench_kg.py           ← benchmark Flat vs Graph (--check: tự kiểm, miễn phí)
+├── bench_kg.py           ← benchmark Flat vs Graph (--check: tự kiểm, < 0,001 USD)
 ├── data/
 │   ├── drug_law/         ← KB luật (1 file/Điều) + sources.csv
 │   ├── drug_news/        ← KB tin (1 file/bài) + sources.csv
 │   └── benchmark_kg.json ← 6 câu hỏi, đáp án chuẩn, từ khóa bắt buộc
 ├── src/
-│   ├── graph.py          ← ★ TODO KG-1..KG-4
+│   ├── graph.py          ← ★ TODO KG-1..KG-4 + ontology gợi ý (HINT)
 │   ├── llm.py            ← gọi OpenAI có đo token/USD/giây (có sẵn)
 │   └── chunking.py, store.py, agent.py, embeddings.py, models.py  ← base RAG (có sẵn)
 ├── scripts/
@@ -105,8 +106,8 @@ Phần base (chunking, vector store, agent RAG) **đã có sẵn và chạy đư
 │   └── fetch_public_pages.py  ← tiện ích crawl trang công khai
 ├── tests/
 │   ├── test_base.py      ← kiểm tra base RAG (đã pass sẵn)
-│   └── test_graph.py     ← kiểm tra KG-1..KG-3
-└── report/               ← báo cáo + ảnh của bạn
+│   └── test_graph.py     ← kiểm tra KG-1, KG-4 (KG-2, KG-3 kiểm bằng --check)
+└── report/               ← ONTOLOGY.md + REPORT_KG.md + ảnh của bạn
 ```
 
 ## Nguồn dữ liệu

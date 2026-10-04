@@ -1,6 +1,16 @@
 """Knowledge Graph (Neo4j) + GraphRAG over two drug-topic knowledge bases.
 
-Schema (Crime is the bridge between the law KB and the news KB):
+Contract (fixed — bench_kg.py and the tests rely on it):
+    link_entity(name, known)                       -> one of `known` or None          (TODO KG-1)
+    build_graph(graph, law_docs, news_docs, llm_fn)   load both KBs into Neo4j      (TODO KG-2)
+        every node created from ONE document carries the property `doc_id`
+    Neo4jGraph.context(question, doc_ids)         -> list[str] facts               (TODO KG-3)
+    GraphRAGAgent.answer(question, top_k)         -> str                           (TODO KG-4)
+
+Everything else in this file is a HINT: one possible ontology (below). Use it as is, change it,
+or design your own — your own ontology + report/ONTOLOGY.md earns the bonus (see SUBMISSION.md).
+
+Suggested ontology (Crime is the bridge between the law KB and the news KB):
 
     (:Article {id, title, law, doc_id})-[:DEFINES]->(:Crime {name})
     (:Article)-[:HAS_CLAUSE]->(:Clause {id, number, penalty, text})-[:MENTIONS]->(:Substance {name})
@@ -42,22 +52,47 @@ def normalize_crime(name: str) -> str:
     name = re.sub(r"\s+", " ", name.strip().strip("\"'“”").lower())
     return name.removeprefix("tội ").strip()
 
-def link_crime(charge: str, known_crimes: list[str]) -> str | None:
-    """Map a free-text charge from the news onto one crime defined in the law KB (or None)."""
-    # TODO: normalize_crime(charge); exact match in known_crimes, else difflib.get_close_matches(cutoff=0.8)
-    raise NotImplementedError("TODO KG-1 link_crime (src/graph.py) - kiểm tra: pytest tests/test_graph.py -k LinkCrime")
+def link_entity(name: str, known: list[str], normalize: Callable[[str], str] = normalize_crime) -> str | None:
+    """Map a free-text mention (e.g. a charge written by a journalist) onto one canonical name in `known`."""
+    # TODO KG-1: normalize both sides, exact match first, then difflib.get_close_matches(cutoff=0.8).
+    #            Return the ORIGINAL spelling from `known`; return None when nothing is close enough.
+    raise NotImplementedError("TODO KG-1 link_entity (src/graph.py) - kiểm tra: pytest tests/test_graph.py -k LinkEntity")
 
 def find_substances(text: str) -> list[str]:
     lowered = text.lower()
     return [name for name in SUBSTANCES if name.lower() in lowered]
 
+# ----------------------------------------------------------------------------------------------
+# HINT — suggested ontology: extraction helpers
+# ----------------------------------------------------------------------------------------------
+
 def parse_law_article(doc: Document) -> dict[str, Any]:
     """Deterministic (regex) extraction for one 'Điều' — law text is regular enough to skip the LLM."""
-    # TODO: return {"id": metadata["article"], "law", "title" (after "Điều N BLHS. "), "doc_id",
-    #   "crime": normalize_crime(title) if title starts with "Tội " else None,
-    #   "clauses": [{"id": f"{article_id} khoản {n}", "number": n, "penalty": "phạt tù từ ...", "text", "substances"}]}
-    # Hint: strip FOOTNOTE, split on CLAUSE_START, penalty = text after "bị " on the clause's first line.
-    raise NotImplementedError("TODO KG-2 parse_law_article (src/graph.py) - kiểm tra: pytest tests/test_graph.py -k ParseLawArticle")
+    article_id = doc.metadata["article"]                       # "Điều 251 BLHS"
+    title = doc.metadata["title"].split(". ", 1)[-1]           # "Tội mua bán trái phép chất ma túy"
+    body = FOOTNOTE.sub("", doc.content)
+    starts = list(CLAUSE_START.finditer(body))
+    clauses = []
+    for index, start in enumerate(starts):
+        end = starts[index + 1].start() if index + 1 < len(starts) else len(body)
+        text = body[start.start():end].strip()
+        first_line = text.splitlines()[0]
+        penalty = re.search(r"\bbị ((?:phạt|tù|cảnh cáo).+?)(?::|$)", first_line)
+        clauses.append({
+            "id": f"{article_id} khoản {start.group(1)}",
+            "number": int(start.group(1)),
+            "penalty": penalty.group(1).rstrip(".") if penalty else "",
+            "text": text,
+            "substances": find_substances(text),
+        })
+    return {
+        "id": article_id,
+        "law": doc.metadata.get("law", ""),
+        "title": title,
+        "doc_id": doc.id,
+        "crime": normalize_crime(title) if title.startswith("Tội ") else None,
+        "clauses": clauses,
+    }
 
 NEWS_EXTRACTION_PROMPT = """Bạn trích xuất knowledge graph từ một bài báo tiếng Việt về ma túy.
 Chỉ dùng thông tin có trong bài. Trả về JSON đúng dạng:
@@ -92,13 +127,17 @@ def extract_news_cases(doc: Document, llm_fn: Callable[[str], str], known_crimes
     except (json.JSONDecodeError, AttributeError):
         return []
     for case in cases:
-        case["charges"] = sorted({c for c in (link_crime(x, known_crimes) for x in case.get("charges", [])) if c})
+        case["charges"] = sorted({c for c in (link_entity(x, known_crimes) for x in case.get("charges", [])) if c})
         for person in case.get("people", []):
-            person["charge"] = link_crime(person.get("charge") or "", known_crimes) or ""
+            person["charge"] = link_entity(person.get("charge") or "", known_crimes) or ""
     return cases
 
+# ----------------------------------------------------------------------------------------------
+# Neo4j
+# ----------------------------------------------------------------------------------------------
+
 class Neo4jGraph:
-    """Thin wrapper over the official neo4j driver: load the two KBs, then fetch question context."""
+    """Thin wrapper over the official neo4j driver."""
 
     def __init__(self, uri: str, user: str, password: str) -> None:
         from neo4j import GraphDatabase
@@ -114,7 +153,56 @@ class Neo4jGraph:
         return [record.data() for record in records]
 
     def reset(self) -> None:
+        """Delete every node, relationship and constraint (bench_kg.py calls this before build_graph)."""
         self.run("MATCH (n) DETACH DELETE n")
+        for row in self.run("SHOW CONSTRAINTS YIELD name RETURN name"):
+            self.run(f"DROP CONSTRAINT `{row['name']}` IF EXISTS")
+
+    def stats(self) -> dict[str, int]:
+        nodes = self.run("MATCH (n) RETURN count(n) AS n")[0]["n"]
+        rels = self.run("MATCH ()-[r]->() RETURN count(r) AS n")[0]["n"]
+        return {"nodes": nodes, "relationships": rels}
+
+    def seed_facts(self, question: str, doc_ids: list[str], skip_labels: tuple[str, ...] = (),
+                   limit: int = 60) -> tuple[list[str], list[str]]:
+        """Ontology-independent first step: seed nodes + their 1-hop edges as text facts.
+
+        Seeds = nodes whose `doc_id` is in doc_ids, or whose `name`/`aliases` appear in the question.
+        Returns (seed elementIds, facts). Nodes with a label in skip_labels are left out of the facts.
+        """
+        seeds = self.run(
+            """
+            MATCH (n)
+            WHERE n.doc_id IN $doc_ids
+               OR (n.name IS :: STRING AND size(n.name) >= 3 AND toLower($q) CONTAINS toLower(n.name))
+               OR any(a IN coalesce(n.aliases, []) WHERE size(a) >= 3 AND toLower($q) CONTAINS toLower(a))
+            RETURN elementId(n) AS id
+            """,
+            q=question, doc_ids=doc_ids,
+        )
+        seed_ids = [row["id"] for row in seeds]
+        edges = self.run(
+            """
+            MATCH (s)-[r]-(m)
+            WHERE elementId(s) IN $ids
+              AND none(l IN labels(s) + labels(m) WHERE l IN $skip)
+            WITH DISTINCT r LIMIT $limit
+            WITH startNode(r) AS a, r, endNode(r) AS b
+            RETURN labels(a)[0] AS a_label, coalesce(a.name, a.id) AS a_name, type(r) AS rel,
+                   properties(r) AS props, labels(b)[0] AS b_label, coalesce(b.name, b.id) AS b_name
+            """,
+            ids=seed_ids, skip=list(skip_labels), limit=limit,
+        )
+        facts = []
+        for e in edges:
+            props = ", ".join(f"{k}: {v}" for k, v in e["props"].items() if v)
+            facts.append(f"({e['a_label']}: {e['a_name']}) -[{e['rel']}{' {' + props + '}' if props else ''}]-> "
+                         f"({e['b_label']}: {e['b_name']})")
+        return seed_ids, facts
+
+    # ---------------------------------------------------------------- HINT — suggested ontology: writes
+
+    def suggested_constraints(self) -> None:
         for label, key in [("Article", "id"), ("Clause", "id"), ("Crime", "name"), ("Case", "name"),
                            ("Substance", "name"), ("Person", "name"), ("Location", "name")]:
             self.run(f"CREATE CONSTRAINT IF NOT EXISTS FOR (n:{label}) REQUIRE n.{key} IS UNIQUE")
@@ -128,7 +216,7 @@ class Neo4jGraph:
             WITH a
             UNWIND $clauses AS clause
             MERGE (cl:Clause {id: clause.id})
-              SET cl.number = clause.number, cl.penalty = clause.penalty, cl.text = clause.text
+              SET cl.number = clause.number, cl.penalty = clause.penalty, cl.text = clause.text, cl.doc_id = $doc_id
             MERGE (a)-[:HAS_CLAUSE]->(cl)
             FOREACH (s IN clause.substances | MERGE (sub:Substance {name: s}) MERGE (cl)-[:MENTIONS]->(sub))
             """,
@@ -156,57 +244,28 @@ class Neo4jGraph:
             doc_id=doc.id, title=doc.metadata.get("title", ""),
         )
 
-    def stats(self) -> dict[str, int]:
-        nodes = self.run("MATCH (n) RETURN count(n) AS n")[0]["n"]
-        rels = self.run("MATCH ()-[r]->() RETURN count(r) AS n")[0]["n"]
-        return {"nodes": nodes, "relationships": rels}
+    # ---------------------------------------------------------------- KG-3
 
     def context(self, question: str, doc_ids: list[str], max_facts: int = 60) -> list[str]:
-        """Graph facts for a question: seed nodes -> 1-hop neighbours -> legal basis of every case reached."""
-        seeds = self.run(
-            """
-            MATCH (n)
-            WHERE n.doc_id IN $doc_ids
-               OR (n:Article AND any(num IN $articles WHERE n.id STARTS WITH 'Điều ' + num + ' '))
-               OR ((n:Person OR n:Location OR n:Substance OR n:Crime) AND size(n.name) >= 3 AND
-                   (toLower($q) CONTAINS toLower(n.name) OR
-                    any(a IN coalesce(n.aliases, []) WHERE toLower($q) CONTAINS toLower(a))))
-            RETURN elementId(n) AS id
-            """,
-            q=question, doc_ids=doc_ids, articles=re.findall(r"[Đđ]iều (\d+)", question),
-        )
-        seed_ids = [row["id"] for row in seeds]
-        edges = self.run(
-            """
-            MATCH (s)-[r]-(m) WHERE elementId(s) IN $ids AND NOT m:Clause AND NOT s:Clause
-            WITH DISTINCT r LIMIT $limit
-            WITH startNode(r) AS a, r, endNode(r) AS b
-            RETURN labels(a)[0] AS a_label, coalesce(a.name, a.id) AS a_name, type(r) AS rel,
-                   properties(r) AS props, labels(b)[0] AS b_label, coalesce(b.name, b.id) AS b_name,
-                   CASE WHEN a:Case THEN elementId(a) WHEN b:Case THEN elementId(b) END AS case_id
-            """,
-            ids=seed_ids, limit=max_facts,
-        )
-        facts = []
-        for e in edges:
-            props = ", ".join(f"{k}: {v}" for k, v in e["props"].items() if v)
-            facts.append(f"({e['a_label']}: {e['a_name']}) -[{e['rel']}{' {' + props + '}' if props else ''}]-> "
-                         f"({e['b_label']}: {e['b_name']})")
-        case_ids = list({e["case_id"] for e in edges if e["case_id"]} | set(seed_ids))
-        for row in self.run(
-            """
-            MATCH (k:Case) WHERE elementId(k) IN $ids
-            RETURN k.name AS name, k.summary AS summary
-            """,
-            ids=case_ids,
-        ):
-            facts.append(f"Vụ việc '{row['name']}': {row['summary']}")
-        # TODO (core of GraphRAG): cross-KB hop. For every case in case_ids, follow
-        #   (Case)-[:CHARGED_WITH]->(Crime)<-[:DEFINES]-(Article)-[:HAS_CLAUSE]->(Clause)
-        # keep clause 1 + clauses that MENTION a substance the case INVOLVES; also, for Article seeds,
-        # clause 1 + clauses mentioning find_substances(question). Append one fact per clause:
-        #   f"[{article_id} - {title}] khoản {number}: {text}"
-        raise NotImplementedError("TODO KG-4 hop xuyên KB trong Neo4jGraph.context (src/graph.py) - kiểm tra: python bench_kg.py --check")
+        """Graph facts for a question: seeds + 1 hop, then the legal basis of every case reached."""
+        # TODO KG-3: multi-hop retrieval over YOUR ontology.
+        #   1. self.seed_facts(question, doc_ids) -> (seed_ids, facts)   (ontology-independent, already written)
+        #   2. From the seeds, walk to the other KB through your bridge node (Cypher, see LAB_GUIDE Bước 5)
+        #   3. Append one readable string per fact; return the list.
+        raise NotImplementedError("TODO KG-3 Neo4jGraph.context (src/graph.py) - kiểm tra: python bench_kg.py --check")
+
+# ---------------------------------------------------------------------------------------------- KG-2
+
+def build_graph(graph: Neo4jGraph, law_docs: list[Document], news_docs: list[Document],
+                llm_fn: Callable[..., str]) -> None:
+    """Load both KBs into an empty graph. llm_fn(prompt, json_mode=False) -> str (metered OpenAI chat)."""
+    # TODO KG-2: create YOUR ontology in Neo4j from both KBs.
+    #   Contract: every node created from one document has the property doc_id = Document.id.
+    #   Fastest start: the HINT helpers above (parse_law_article, extract_news_cases, suggested_constraints,
+    #   add_law_article, add_news_case). Own ontology + report/ONTOLOGY.md = bonus (SUBMISSION.md).
+    raise NotImplementedError("TODO KG-2 build_graph (src/graph.py) - kiểm tra: python bench_kg.py --check")
+
+# ---------------------------------------------------------------------------------------------- KG-4
 
 GRAPH_PROMPT = """Trả lời câu hỏi chỉ dựa trên ngữ cảnh (đoạn văn bản và dữ kiện từ knowledge graph).
 Nêu rõ số Điều luật khi có. Nếu ngữ cảnh không đủ, nói không đủ thông tin.
@@ -229,6 +288,6 @@ class GraphRAGAgent:
         self.llm_fn = llm_fn
 
     def answer(self, question: str, top_k: int = 3) -> str:
-        # TODO: vector top-k (same as flat RAG) -> doc_ids of the hits -> self.graph.context(question, doc_ids)
-        #       -> fill GRAPH_PROMPT -> self.llm_fn(prompt)
-        raise NotImplementedError("TODO KG-3 GraphRAGAgent.answer (src/graph.py) - kiểm tra: pytest tests/test_graph.py -k GraphRAGAgent")
+        # TODO KG-4: vector top-k (same as flat RAG) -> doc_ids of the hits -> self.graph.context(question, doc_ids)
+        #            -> fill GRAPH_PROMPT -> self.llm_fn(prompt)
+        raise NotImplementedError("TODO KG-4 GraphRAGAgent.answer (src/graph.py) - kiểm tra: pytest tests/test_graph.py -k GraphRAGAgent")

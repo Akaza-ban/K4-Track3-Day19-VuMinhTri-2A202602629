@@ -1,7 +1,7 @@
 """Flat RAG vs GraphRAG (Neo4j) on the two drug knowledge bases: accuracy, latency, tokens, USD.
 
     docker run -d --name neo4j-drug-kg -p 7474:7474 -p 7687:7687 -e NEO4J_AUTH=neo4j/password123 neo4j:5
-    python bench_kg.py --check    # free: env + Neo4j + KG-1..KG-4 sanity check, no OpenAI calls
+    python bench_kg.py --check    # self-check KG-1..KG-4 on 1 news article (~1 LLM call, < 0.001 USD)
     python bench_kg.py            # needs OPENAI_API_KEY in .env
     python bench_kg.py --judge    # + LLM-as-judge score (metered separately, not counted in pipeline cost)
 
@@ -86,53 +86,60 @@ def load_corpus():
              "python scripts/crawl_drug_corpus.py --news-limit 20")
     return law_docs, news_docs
 
+CHECK_NEWS = "news-100260918080821054"   # Lê Minh Thành — mua bán trái phép chất ma túy (Điều 251)
+CHECK_QUESTION = "Lê Minh Thành bị tuyên bao nhiêu tháng tù, về tội gì, theo Điều nào của Bộ luật Hình sự?"
+
 def check() -> int:
-    """Free self-check (no OpenAI call) so students find setup/TODO problems before spending money."""
+    """Ontology-independent self-check: only the contract in src/graph.py is tested, not your labels."""
     law_docs, news_docs = load_corpus()
     ok(f"Dữ liệu: {len(law_docs)} điều luật, {len(news_docs)} bài báo")
-    articles = [graph_mod.parse_law_article(doc) for doc in law_docs]
-    a251 = next((a for a in articles if a["id"] == "Điều 251 BLHS"), None)
-    if not a251 or a251["crime"] != "mua bán trái phép chất ma túy" or len(a251["clauses"]) < 4:
-        fail("KG-2", "parse_law_article chưa đúng với Điều 251 BLHS (crime hoặc số khoản sai).",
-             "pytest tests/test_graph.py -k ParseLawArticle -v")
-    ok("KG-2 parse_law_article: Điều 251 có crime + đủ khoản")
-    crimes = [a["crime"] for a in articles if a["crime"]]
-    if graph_mod.link_crime("Tội mua bán trái phép chất ma tuý", crimes) != "mua bán trái phép chất ma túy":
-        fail("KG-1", "link_crime không map được biến thể chính tả 'ma tuý' về tội trong luật.",
-             "pytest tests/test_graph.py -k LinkCrime -v")
-    ok("KG-1 link_crime")
+    crimes = ["mua bán trái phép chất ma túy", "vận chuyển trái phép chất ma túy"]
+    if graph_mod.link_entity("Tội Mua bán trái phép chất ma tuý", crimes) != crimes[0]             or graph_mod.link_entity("lừa đảo chiếm đoạt tài sản", crimes) is not None:
+        fail("KG-1", "link_entity chưa map đúng biến thể chính tả, hoặc nối bừa tên không liên quan.",
+             "pytest tests/test_graph.py -k LinkEntity -v")
+    ok("KG-1 link_entity")
 
+    require_key()
     graph = connect_graph()
     ok("Neo4j kết nối được")
+    llm = llm_mod.MeteredOpenAI()
+    news = [d for d in news_docs if d.id == CHECK_NEWS]
     graph.reset()
-    for article in articles:
-        graph.add_law_article(article)
-    fixture = {"name": "[check] Vụ Lê Minh Thành", "summary": "Mua bán MDMA.",
-               "charges": ["mua bán trái phép chất ma túy"], "substances": [{"name": "MDMA", "amount": "5 viên"}],
-               "people": [{"name": "Lê Minh Thành", "role": "bị cáo", "charge": "", "sentence": "36 tháng tù"}]}
-    graph.add_news_case(fixture, Document("check", "", {}))
-    facts = graph.context("Lê Minh Thành bị xử theo điều nào?", [])
-    clause_facts = [f for f in facts if f.startswith("[Điều 251 BLHS")]
-    if not any("khoản 1:" in f for f in clause_facts) or not any("MDMA" in f for f in clause_facts):
-        fail("KG-4", "Neo4jGraph.context không đi được Person -> Case -> Crime -> Article -> Clause.",
-             "thử Cypher trong Neo4j Browser (LAB_GUIDE.md Bước 5); cần có khoản 1 và khoản nhắc MDMA của Điều 251.")
-    ok(f"KG-4 hop xuyên KB: {len(clause_facts)} khoản của Điều 251 lấy được từ 'Lê Minh Thành'")
+    graph_mod.build_graph(graph, law_docs, news, llm.chat)
+    by_doc = {r["doc_id"]: r["n"] for r in graph.run(
+        "MATCH (n) WHERE n.doc_id IS NOT NULL RETURN n.doc_id AS doc_id, count(n) AS n")}
+    law_ids = [d.id for d in law_docs]
+    if not any(i in by_doc for i in law_ids) or CHECK_NEWS not in by_doc:
+        fail("KG-2", "build_graph chưa tạo node mang property doc_id cho cả 2 KB.",
+             "mỗi node sinh ra từ 1 tài liệu phải có doc_id = Document.id (hợp đồng đầu file src/graph.py).")
+    path = graph.run(
+        "MATCH (a), (b) WHERE a.doc_id IN $law AND b.doc_id = $news "
+        "MATCH p = shortestPath((a)-[*..4]-(b)) RETURN length(p) AS hops ORDER BY hops LIMIT 1",
+        law=law_ids, news=CHECK_NEWS)
+    if not path:
+        fail("KG-2", "Không có đường đi (<= 4 cạnh) nối node của KB luật với node của bài báo: cầu nối 2 KB bị gãy.",
+             "xem node cầu nối trong ontology của bạn; thử trong Neo4j Browser: "
+             f"MATCH (b {{doc_id:'{CHECK_NEWS}'}})-[*..2]-(x) RETURN b, x")
+    stats = graph.stats()
+    ok(f"KG-2 build_graph: {stats['nodes']} node / {stats['relationships']} cạnh, "
+       f"đường xuyên 2 KB dài {path[0]['hops']} cạnh")
+
+    facts = graph.context(CHECK_QUESTION, [CHECK_NEWS])
+    if not any("251" in f for f in facts):
+        fail("KG-3", "Neo4jGraph.context không đưa được Điều 251 BLHS vào dữ kiện cho câu hỏi về Lê Minh Thành.",
+             "in thử graph.context(...) và viết lại Cypher multi-hop trong Neo4j Browser (LAB_GUIDE.md Bước 5).")
+    ok(f"KG-3 context: {len(facts)} dữ kiện, có Điều 251")
 
     store = EmbeddingStore(collection_name="check", embedding_fn=_m._mock_embed)
-    store.add_documents([Document("check", "Lê Minh Thành bị tuyên 36 tháng tù.", {"doc_id": "check"})])
-    prompt = graph_mod.GraphRAGAgent(store=store, graph=graph, llm_fn=lambda p: p).answer("Lê Minh Thành?", top_k=1)
-    if "Điều 251 BLHS" not in prompt or "36 tháng" not in prompt:
-        fail("KG-3", "GraphRAGAgent.answer chưa đưa cả dữ kiện graph và đoạn văn bản vào prompt.",
+    store.add_documents([Document("check", "Lê Minh Thành bị tuyên 36 tháng tù.", {"doc_id": CHECK_NEWS})])
+    prompt = graph_mod.GraphRAGAgent(store=store, graph=graph, llm_fn=lambda p: p).answer(CHECK_QUESTION, top_k=1)
+    if "251" not in prompt or "36 tháng" not in prompt:
+        fail("KG-4", "GraphRAGAgent.answer chưa đưa cả dữ kiện graph và đoạn văn bản vào prompt.",
              "pytest tests/test_graph.py -k GraphRAGAgent -v")
-    ok("KG-3 GraphRAGAgent.answer")
-    graph.reset()
+    ok("KG-4 GraphRAGAgent.answer")
     graph.close()
-
-    load_dotenv(override=False)
-    if os.getenv("OPENAI_API_KEY", "").startswith("sk-"):
-        ok("OPENAI_API_KEY có trong .env -> chạy: python bench_kg.py --judge")
-    else:
-        print("[CHÚ Ý SETUP-1] Chưa có OPENAI_API_KEY trong .env -> cần trước khi chạy benchmark thật.")
+    ok(f"Chi phí check: {llm.usage.calls} lần gọi LLM, ${llm.usage.usd:.5f}. "
+       "Graph nhỏ (luật + 1 bài) vẫn còn trong Neo4j để bạn xem; chạy --judge để dựng graph đầy đủ.")
     return 0
 
 def main() -> int:
@@ -141,7 +148,7 @@ def main() -> int:
     parser.add_argument("--chunk-size", type=int, default=800)
     parser.add_argument("--judge", action="store_true")
     parser.add_argument("--out", default="ket_qua_benchmark_kg.txt")
-    parser.add_argument("--check", action="store_true", help="free self-check, no OpenAI calls")
+    parser.add_argument("--check", action="store_true", help="self-check KG-1..KG-4 (~1 LLM call)")
     args = parser.parse_args()
     load_dotenv(override=False)
     if args.check:
@@ -159,18 +166,8 @@ def main() -> int:
     _, flat_index = metered(llm, lambda: store.add_documents(chunks))
 
     graph = connect_graph()
-
-    def build_graph() -> None:
-        graph.reset()
-        articles = [graph_mod.parse_law_article(doc) for doc in law_docs]
-        for article in articles:
-            graph.add_law_article(article)
-        crimes = [a["crime"] for a in articles if a["crime"]]
-        for doc in news_docs:
-            for case in graph_mod.extract_news_cases(doc, lambda p: llm.chat(p, json_mode=True), crimes):
-                graph.add_news_case(case, doc)
-
-    _, kg_build = metered(llm, build_graph)
+    graph.reset()
+    _, kg_build = metered(llm, lambda: graph_mod.build_graph(graph, law_docs, news_docs, llm.chat))
     graph_index = flat_index + kg_build
 
     # --- Querying.

@@ -2,7 +2,7 @@
 
 **Họ tên:** …  **MSSV:** …  **Ngày:** …
 
-> Kỳ vọng và thang điểm: `SUBMISSION.md`. Mọi số liệu phải khớp với `ket_qua_benchmark_kg.txt`.
+> Kỳ vọng và thang điểm: `SUBMISSION.md`. Mọi số liệu phải khớp với `ket_qua_benchmark_kg.txt`. Bản thiết kế ontology nộp riêng ở `report/ONTOLOGY.md`.
 
 ## 1. Chi phí (10 điểm)
 
@@ -34,9 +34,9 @@ Dán 2 bảng `Indexing` và `Querying` từ `ket_qua_benchmark_kg.txt`:
 | Q5 | cross-kb-multi-hop | | | | |
 | Q6 | aggregation | | | | |
 
-## 3. Phân tích lỗi (20 điểm, +10 nếu sửa)
+## 3. Phân tích lỗi (20 điểm)
 
-Chọn ít nhất 2 nhóm lỗi trong E1–E6 (`LAB_GUIDE.md` Bước 7). Sao chép khung dưới đây cho mỗi lỗi.
+Chọn ít nhất 2 nhóm lỗi trong E1–E6 (`LAB_GUIDE.md` Bước 8.4). Sao chép khung dưới đây cho mỗi lỗi.
 
 ### Lỗi E…: <tên>
 
@@ -53,7 +53,6 @@ kết quả
 
 - **Nguyên nhân:** …
 - **Đề xuất sửa:** …
-- **(Cộng điểm) Đã sửa:** file/dòng đã đổi; số liệu trước → sau.
 
 ## 4. Kết luận (5 điểm)
 
