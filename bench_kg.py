@@ -1,6 +1,8 @@
 """Flat RAG vs GraphRAG (Neo4j) on the two drug knowledge bases: accuracy, latency, tokens, USD.
 
     docker run -d --name neo4j-drug-kg -p 7474:7474 -p 7687:7687 -e NEO4J_AUTH=neo4j/password123 neo4j:5
+    python bench_kg.py --build --limit 2   # load law + 2 news articles into Neo4j with YOUR build_graph (KG-2)
+    python bench_kg.py --build             # load both full KBs (~20 LLM calls, ~0.01 USD)
     python bench_kg.py --check    # self-check KG-1..KG-4 on 1 news article (~1 LLM call, < 0.001 USD)
     python bench_kg.py            # needs OPENAI_API_KEY in .env
     python bench_kg.py --judge    # + LLM-as-judge score (metered separately, not counted in pipeline cost)
@@ -142,6 +144,33 @@ def check() -> int:
        "Graph nhỏ (luật + 1 bài) vẫn còn trong Neo4j để bạn xem; chạy --judge để dựng graph đầy đủ.")
     return 0
 
+def build(limit: int | None) -> int:
+    """Only load the KG (KG-2) so you can inspect it in Neo4j Browser — no embeddings, no questions."""
+    law_docs, news_docs = load_corpus()
+    if limit:  # always include the article the guide's example queries use (Lê Minh Thành)
+        news_docs = sorted(news_docs, key=lambda d: d.id != CHECK_NEWS)[:limit]
+    require_key()
+    graph = connect_graph()
+    llm = llm_mod.MeteredOpenAI()
+    graph.reset()
+    _, usage = metered(llm, lambda: graph_mod.build_graph(graph, law_docs, news_docs, llm.chat))
+    stats = graph.stats()
+    print(f"Đã nạp {len(law_docs)} điều luật + {len(news_docs)} bài báo: "
+          f"{stats['nodes']} node / {stats['relationships']} cạnh "
+          f"({usage.calls} lần gọi LLM, ${usage.usd:.5f}, {usage.seconds:.1f}s)")
+    for row in graph.run("MATCH (n) RETURN labels(n)[0] AS label, count(*) AS n ORDER BY n DESC"):
+        print(f"  node  {row['label']:<20} {row['n']}")
+    for row in graph.run("MATCH ()-[r]->() RETURN type(r) AS rel, count(*) AS n ORDER BY n DESC"):
+        print(f"  cạnh  {row['rel']:<20} {row['n']}")
+    shared = [r["label"] for r in graph.run(
+        "MATCH (n) WHERE n.doc_id IS NULL RETURN DISTINCT labels(n)[0] AS label")]
+    if shared:
+        print(f"  Label không có doc_id: {', '.join(shared)} "
+              "(chỉ hợp lệ nếu là node dùng chung giữa nhiều tài liệu, ví dụ tội danh, chất)")
+    graph.close()
+    print("Mở http://localhost:7474 để xem graph (LAB_GUIDE.md Bước 8.1).")
+    return 0
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--top-k", type=int, default=3)
@@ -149,10 +178,14 @@ def main() -> int:
     parser.add_argument("--judge", action="store_true")
     parser.add_argument("--out", default="ket_qua_benchmark_kg.txt")
     parser.add_argument("--check", action="store_true", help="self-check KG-1..KG-4 (~1 LLM call)")
+    parser.add_argument("--build", action="store_true", help="only load the KG into Neo4j (KG-2)")
+    parser.add_argument("--limit", type=int, help="with --build: number of news articles to load")
     args = parser.parse_args()
     load_dotenv(override=False)
     if args.check:
         return check()
+    if args.build:
+        return build(args.limit)
 
     require_key()
     law_docs, news_docs = load_corpus()

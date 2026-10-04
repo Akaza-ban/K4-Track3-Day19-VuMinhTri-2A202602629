@@ -273,7 +273,7 @@ def build_graph(graph: Neo4jGraph, law_docs: list[Document], news_docs: list[Doc
     #   Contract: every node created from one document has the property doc_id = Document.id.
     #   Fastest start: the HINT helpers above (parse_law_article, extract_news_cases, suggested_constraints,
     #   add_law_article, add_news_case). Own ontology + report/ONTOLOGY.md = bonus (SUBMISSION.md).
-    raise NotImplementedError("TODO KG-2 build_graph (src/graph.py) - kiểm tra: python bench_kg.py --check")
+    raise NotImplementedError("TODO KG-2 build_graph (src/graph.py) - kiểm tra: python bench_kg.py --build --limit 2")
 
 # ---------------------------------------------------------------------------------------------- KG-4
 

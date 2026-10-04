@@ -8,7 +8,7 @@ Làm **đúng thứ tự**. Mỗi bước có **lệnh kiểm tra** và **dấu 
 | 1 | Đọc dữ liệu và câu hỏi | 15' |
 | 2 | **Thiết kế ontology** → `report/ONTOLOGY.md` | 40' |
 | 3 | KG-1 `link_entity` | 15' |
-| 4 | KG-2 `build_graph` | 50' |
+| 4 | KG-2 `build_graph` + nạp graph vào Neo4j | 50' |
 | 5 | KG-3 `Neo4jGraph.context` (Cypher multi-hop) | 45' |
 | 6 | KG-4 `GraphRAGAgent.answer` | 15' |
 | 7 | Chạy benchmark | 10' |
@@ -178,7 +178,59 @@ for d in news_docs:
 - Văn bản luật rất đều nên dùng **regex**: rẻ, nhanh, và cho cùng kết quả mỗi lần chạy.
 - Thử trích xuất trên **1–2 bài** trước (in JSON ra xem), đừng chạy cả 20 bài ngay.
 
-**Kiểm tra:** chưa có. `--check` cần cả KG-3 nên kiểm ở cuối Bước 5. Trong lúc làm, xem graph trực tiếp ở Neo4j Browser (Bước 8.1).
+### Nạp graph vào Neo4j và xem kết quả
+
+`bench_kg.py --build` gọi `build_graph` của bạn để nạp KG vào Neo4j. Lệnh này chỉ dựng graph: không embed, không chạy câu hỏi. Mỗi lần chạy, graph cũ bị **xóa** rồi dựng lại.
+
+```bash
+# 1. Thử nhỏ trước: toàn bộ luật + 2 bài báo, luôn gồm bài về Lê Minh Thành (~2 lần gọi LLM, < 0,001 USD, ~10 giây)
+python bench_kg.py --build --limit 2
+
+# 2. Ổn rồi thì nạp đủ 2 KB (~20 lần gọi LLM, ~0,01 USD, ~1–2 phút)
+python bench_kg.py --build
+```
+
+Lệnh in ra số node và số cạnh theo từng loại. Ví dụ với ontology gợi ý và `--limit 2`:
+
+```
+Đã nạp 18 điều luật + 2 bài báo: 144 node / 287 cạnh (2 lần gọi LLM, $0.00072, 6.6s)
+  node  Clause               99
+  node  Article              18
+  node  Crime                13
+  ...
+  cạnh  MENTIONS             169
+  cạnh  HAS_CLAUSE           99
+  ...
+  Label không có doc_id: Crime, Substance, Location, Person (chỉ hợp lệ nếu là node dùng chung giữa nhiều tài liệu, ví dụ tội danh, chất)
+```
+
+**Xem graph:** mở http://localhost:7474 (cách đăng nhập và chạy truy vấn: Bước 8.1), rồi chạy:
+
+```cypher
+// Có đủ label trong ontology của bạn chưa?
+MATCH (n) RETURN labels(n)[0] AS label, count(*) AS n ORDER BY n DESC;
+
+// Một bài báo sinh ra những node/cạnh nào? (doc_id lấy từ tên file trong data/drug_news/)
+MATCH (n {doc_id:'news-100260918080821054'})-[r]-(x) RETURN n, r, x;
+
+// Cầu nối: từ node của tin tức có đi tới node của luật không?
+MATCH (a), (b) WHERE a.doc_id STARTS WITH 'blhs-' AND b.doc_id STARTS WITH 'news-'
+MATCH p = shortestPath((a)-[*..4]-(b)) RETURN p LIMIT 5;
+```
+
+**Dấu hiệu xong:**
+- Có đủ các label và quan hệ như trong `report/ONTOLOGY.md` của bạn.
+- Node sinh ra từ một tài liệu có `doc_id`.
+- Truy vấn "Cầu nối" ra ít nhất 1 đường đi.
+
+**Lỗi hay gặp khi nạp:**
+
+| Hiện tượng | Nguyên nhân thường gặp |
+| --- | --- |
+| Thiếu hẳn node của tin tức | Prompt trích xuất trả JSON sai dạng nên bị bỏ qua. In thử `llm_fn(prompt, json_mode=True)` cho 1 bài |
+| Có node tin và node luật nhưng không có đường nối | Tội danh không khớp tên chuẩn, nên node cầu nối bị tách đôi. Kiểm tra `link_entity` và danh sách tên chuẩn trong prompt |
+| Một thứ ngoài đời thành nhiều node | `MERGE` theo khóa không ổn định (tên do LLM tự đặt), hoặc thiếu `CONSTRAINT … IS UNIQUE` |
+| `Neo.ClientError.Schema.ConstraintValidationFailed` | Hai node cùng khóa nhưng tạo bằng `CREATE` thay vì `MERGE` |
 
 ---
 
@@ -225,10 +277,10 @@ for d in news_docs:
 
 **Cách làm khuyến nghị:**
 
-1. Dựng graph bằng code Bước 4. `--check` sẽ dừng ở KG-3, nhưng graph nhỏ (luật + 1 bài báo) vẫn còn lại để thử:
+1. Nạp graph nhỏ bằng code Bước 4 để có dữ liệu thử Cypher:
 
    ```bash
-   python bench_kg.py --check
+   python bench_kg.py --build --limit 2
    ```
 
 2. **Viết Cypher trong Neo4j Browser** (http://localhost:7474, xem Bước 8.1). Bắt đầu đơn giản, thêm dần điều kiện. Ví dụ với ontology gợi ý:
@@ -318,7 +370,7 @@ Bước này gồm 4 phần: **8.1** mở graph và kiểm tra bằng 4 truy v�
 
 ### 8.1 Mở graph trên Neo4j Browser
 
-Graph đầy đủ chỉ có **sau khi** chạy `python bench_kg.py --judge` đến hết (Bước 7). Nếu vừa chạy `--check` thì graph chỉ có luật + 1 bài báo. Graph trống hoặc thiếu thì chạy lại `--judge`.
+Graph đầy đủ có sau khi chạy `python bench_kg.py --judge` (Bước 7) hoặc `python bench_kg.py --build` đến hết. Nếu vừa chạy `--check` hoặc `--build --limit` thì graph chỉ có một phần. Graph trống hoặc thiếu thì chạy lại `python bench_kg.py --build`.
 
 #### Đăng nhập
 
@@ -449,7 +501,7 @@ Pipeline có những điểm yếu **thật**, điển hình của GraphRAG ngo�
 | `UnicodeEncodeError: 'charmap'` | Terminal Windows không dùng UTF-8 | `$env:PYTHONIOENCODING="utf-8"` (PowerShell) hoặc `export PYTHONIOENCODING=utf-8` (Git Bash) |
 | `ModuleNotFoundError: neo4j` hoặc `openai` | Chưa cài, hoặc sai venv | Kích hoạt `.venv` rồi `pip install -r requirements.txt` |
 | `tests/test_base.py` fail | Bạn đã sửa vào base RAG | `git diff src/chunking.py src/store.py src/agent.py`, hoàn tác phần sửa nhầm |
-| Neo4j Browser trống, hoặc chỉ có luật + 1 bài báo | Lần chạy bị dừng giữa chừng, hoặc vừa chạy `--check` (chỉ dựng graph nhỏ) | Chạy lại `python bench_kg.py --judge` đến hết |
+| Neo4j Browser trống, hoặc chỉ có một phần graph | Lần chạy bị dừng giữa chừng, hoặc vừa chạy `--check` / `--build --limit` (chỉ dựng graph nhỏ) | `python bench_kg.py --build` (chỉ nạp graph, ~1–2 phút) |
 | Ảnh graph rối, quá nhiều node | Truy vấn trả về quá nhiều | Thêm `LIMIT 25`, hoặc lọc theo một `Case`/`Article` cụ thể |
 
 Vẫn kẹt sau khi tra bảng: ghi lại **lệnh đã chạy + toàn bộ thông báo lỗi**, đưa vào mục "Vấn đề gặp phải" trong báo cáo, rồi làm tiếp các bước không phụ thuộc vào lỗi đó.
