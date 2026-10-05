@@ -27,6 +27,8 @@ Làm **đúng thứ tự**. Mỗi bước có **lệnh kiểm tra** và **dấu 
 
 **Cần có:** Python 3.11, Docker Desktop (đang chạy), và ít nhất một API key: OpenAI (khuyên dùng), OpenRouter, Gemini hoặc Anthropic. Anthropic chỉ dùng cho chat; embedding cần OpenAI/OpenRouter/Gemini.
 
+> **Bật Docker Desktop trước** mỗi khi chạy lệnh `docker run` / `docker start neo4j-drug-kg` (kể cả mỗi lần mở lại máy). Đợi biểu tượng Docker chuyển xanh rồi mới chạy. Nếu chưa bật, lệnh báo `cannot connect to the Docker daemon`.
+
 ```bash
 # 1. Môi trường Python
 py -3.11 -m venv .venv            # macOS/Linux: python3.11 -m venv .venv
